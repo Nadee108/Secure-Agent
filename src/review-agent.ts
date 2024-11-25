@@ -81,7 +81,9 @@ const filterFile = (file: PRFile) => {
   }
   const extension = splitFilename.pop()?.toLowerCase();
   if (extension && extensionsToIgnore.has(extension)) {
-    console.log(`Filtering out file with ignored extension: ${file.filename} (.${extension})`);
+    console.log(
+      `Filtering out file with ignored extension: ${file.filename} (.${extension})`
+    );
     return false;
   }
   return true;
@@ -162,47 +164,97 @@ const stripRemovedLines = (originalFile: PRFile) => {
   return { ...originalFile, patch: strippedPatch };
 };
 
+const chunkLargeFile = (file: PRFile, maxTokens: number): PRFile[] => {
+  const lines = file.patch.split("\n");
+  const chunks: PRFile[] = [];
+  let currentChunk: string[] = [];
+  let currentTokenCount = 0;
+
+  lines.forEach((line) => {
+    const lineTokenCount = getTokenLength(line);
+
+    // If adding the current line exceeds the token limit, finalize the current chunk
+    if (currentTokenCount + lineTokenCount > maxTokens) {
+      chunks.push({
+        ...file,
+        patch: currentChunk.join("\n"),
+        patchTokenLength: currentTokenCount,
+      });
+      currentChunk = [];
+      currentTokenCount = 0;
+    }
+
+    currentChunk.push(line);
+    currentTokenCount += lineTokenCount;
+  });
+
+  // Push the final chunk if there are remaining lines
+  if (currentChunk.length > 0) {
+    chunks.push({
+      ...file,
+      patch: currentChunk.join("\n"),
+      patchTokenLength: currentTokenCount,
+    });
+  }
+
+  return chunks;
+};
+
 const processOutsideLimitFiles = (
   files: PRFile[],
   patchBuilder: (file: PRFile) => string,
   convoBuilder: (diff: string) => ChatCompletionMessageParam[]
-) => {
+): PRFile[][] => {
   const processGroups: PRFile[][] = [];
-  if (files.length == 0) {
+  if (files.length === 0) {
     return processGroups;
   }
+
+  // Remove lines starting with "-" to simplify patch processing
   files = files.map((file) => stripRemovedLines(file));
-  const convoWithinModelLimit = isConversationWithinLimit(
-    constructPrompt(files, patchBuilder, convoBuilder)
+
+  const maxTokens = 4000; // Assume a reasonable token limit (adjust based on model)
+  const exceedingLimits: PRFile[] = [];
+  const withinLimits: PRFile[] = [];
+
+  files.forEach((file) => {
+    const isWithinLimit = isConversationWithinLimit(
+      constructPrompt([file], patchBuilder, convoBuilder)
+    );
+    if (isWithinLimit) {
+      withinLimits.push(file);
+    } else {
+      exceedingLimits.push(file);
+    }
+  });
+
+  // Process files that are already within the limit
+  const withinLimitsGroups = processWithinLimitFiles(
+    withinLimits,
+    patchBuilder,
+    convoBuilder
   );
-  if (convoWithinModelLimit) {
-    processGroups.push(files);
-  } else {
-    const exceedingLimits: PRFile[] = [];
-    const withinLimits: PRFile[] = [];
-    files.forEach((file) => {
-      const isFileConvoWithinLimits = isConversationWithinLimit(
-        constructPrompt([file], patchBuilder, convoBuilder)
+  processGroups.push(...withinLimitsGroups);
+
+  // Process files exceeding the limit by chunking them
+  exceedingLimits.forEach((file) => {
+    const chunks = chunkLargeFile(file, maxTokens);
+
+    chunks.forEach((chunk) => {
+      const isChunkWithinLimit = isConversationWithinLimit(
+        constructPrompt([chunk], patchBuilder, convoBuilder)
       );
-      if (isFileConvoWithinLimits) {
-        withinLimits.push(file);
+
+      if (isChunkWithinLimit) {
+        processGroups.push([chunk]);
       } else {
-        exceedingLimits.push(file);
+        console.log(
+          `File chunk still exceeds token limit despite splitting: ${file.filename}`
+        );
       }
     });
-    const withinLimitsGroup = processWithinLimitFiles(
-      withinLimits,
-      patchBuilder,
-      convoBuilder
-    );
-    withinLimitsGroup.forEach((group) => {
-      processGroups.push(group);
-    });
-    if (exceedingLimits.length > 0) {
-      console.log("TODO: Need to further chunk large file changes.");
-      // throw "Unimplemented"
-    }
-  }
+  });
+
   return processGroups;
 };
 
@@ -517,7 +569,9 @@ export const processPullRequest = async (
   const filteredFiles = files.filter((file) => filterFile(file));
   console.dir({ filteredFiles }, { depth: null });
   if (filteredFiles.length == 0) {
-    console.log("Nothing to comment on, all files were filtered out. The PR Agent does not support the following file types: pdf, png, jpg, jpeg, gif, mp4, mp3, md, json, env, toml, svg, package-lock.json, yarn.lock, .gitignore, package.json, tsconfig.json, poetry.lock, readme.md");
+    console.log(
+      "Nothing to comment on, all files were filtered out. The PR Agent does not support the following file types: pdf, png, jpg, jpeg, gif, mp4, mp3, md, json, env, toml, svg, package-lock.json, yarn.lock, .gitignore, package.json, tsconfig.json, poetry.lock, readme.md"
+    );
     return {
       review: null,
       suggestions: [],
